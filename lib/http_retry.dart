@@ -28,6 +28,8 @@ class RetryClient extends BaseClient {
   /// The callback to call to indicate that a request is being retried.
   final void Function(BaseRequest, BaseResponse, int) _onRetry;
 
+  final Future<dynamic> Function(int, BaseRequest, BaseResponse, dynamic) _waiter;
+
   /// Creates a client wrapping [inner] that retries HTTP requests.
   ///
   /// This retries a failing request [retries] times (3 by default). Note that
@@ -43,6 +45,9 @@ class RetryClient extends BaseClient {
   /// [delay] is passed, it's used to determine the time to wait before the
   /// given (zero-based) retry.
   ///
+  /// If [waiter] is passed, then [delay] will be ignored and instead wait until [waiter] returns.
+  /// Any errors thrown by [waiter] will not be caught - in case of an error retrying will stop.
+  ///
   /// If [onRetry] is passed, it's called immediately before each retry so that
   /// the client has a chance to perform side effects like logging. The
   /// `response` parameter will be null if the request was retried due to an
@@ -52,10 +57,12 @@ class RetryClient extends BaseClient {
       bool when(BaseResponse response),
       bool whenError(error, StackTrace stackTrace),
       Duration delay(int retryCount),
+      Future<dynamic> waiter(int retryCount, BaseRequest request, BaseResponse response, dynamic error),
       void onRetry(BaseRequest request, BaseResponse response, int retryCount)})
       : _retries = retries ?? 3,
         _when = when ?? ((response) => response.statusCode == 503),
         _whenError = whenError ?? ((_, __) => false),
+        _waiter = waiter,
         _delay = delay ??
             ((retryCount) =>
                 new Duration(milliseconds: 500) * math.pow(1.5, retryCount)),
@@ -93,10 +100,13 @@ class RetryClient extends BaseClient {
     var i = 0;
     while (true) {
       StreamedResponse response;
+      var err;
+
       try {
         response = await _inner.send(_copyRequest(request, splitter.split()));
       } catch (error, stackTrace) {
         if (i == _retries || !_whenError(error, stackTrace)) rethrow;
+        err = error;
       }
 
       if (response != null) {
@@ -107,7 +117,13 @@ class RetryClient extends BaseClient {
         response.stream.listen((_) {}).cancel()?.catchError((_) {});
       }
 
-      await new Future.delayed(_delay(i));
+      if (_waiter != null) {
+        await _waiter(i, request, response, err);
+
+      } else {
+        await new Future.delayed(_delay(i));
+      }
+
       if (_onRetry != null) _onRetry(request, response, i);
       i++;
     }
